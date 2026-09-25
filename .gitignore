@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+
+# Database & Vector Store
+*.db
+*.sqlite3
+data/autosar_hld.db
+data/vector_store/*.faiss
+data/vector_store/*.pkl
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & Temporary Files
+*.log
+data/logs/
+data/processed/
+
+# IDE
+.vscode/
+.idea/
+*.swp

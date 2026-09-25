@@ -1,16 +1,24 @@
 """
-AUTOSAR HLD AI - Security Utilities
-Password hashing, JWT tokens, and security helpers.
+AUTOSAR HLD AI - Security & RBAC Utilities
+Password hashing, JWT tokens, OAuth2 dependencies, and Role-Based Access Control.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, List, Callable
 import hashlib
 import hmac
 import secrets
+import re
 from jose import JWTError, jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
 
 from app.utils.config import settings
+from app.backend.database import get_db
+from app.backend.models import User
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -65,18 +73,79 @@ def decode_access_token(token: str) -> Optional[dict]:
         return None
 
 
+def get_current_user(token: Optional[str] = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    """
+    FastAPI dependency to extract and authenticate current user from Bearer JWT.
+    Throws 401 if missing or invalid.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials or token expired",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not token:
+        raise credentials_exception
+
+    payload = decode_access_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    username: str = payload.get("sub") or payload.get("username")
+    if username is None:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.username == username).first()
+    if user is None or not user.is_active:
+        raise credentials_exception
+
+    return user
+
+
+def get_optional_current_user(token: Optional[str] = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[User]:
+    """
+    Extract current user if valid token provided; returns None otherwise.
+    """
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+        if not payload:
+            return None
+        username = payload.get("sub") or payload.get("username")
+        if not username:
+            return None
+        return db.query(User).filter(User.username == username, User.is_active == True).first()
+    except Exception:
+        return None
+
+
+def require_role(allowed_roles: List[str]) -> Callable:
+    """
+    RBAC dependency factory. Ensures current user possesses one of the allowed roles.
+    Example: Depends(require_role(["admin", "architect", "engineer"]))
+    """
+    allowed_lower = [r.lower() for r in allowed_roles]
+
+    def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        user_role = (current_user.role or "").lower()
+        if "admin" in allowed_lower or user_role in allowed_lower:
+            return current_user
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: requires one of the following roles: {allowed_roles}. Current role: '{current_user.role}'."
+        )
+
+    return role_checker
+
+
 def sanitize_filename(filename: str) -> str:
     """
     Sanitize a filename to prevent path traversal and other attacks.
     """
-    import re
-    # Remove path separators
     filename = filename.replace("/", "_").replace("\\", "_")
-    # Remove potentially dangerous characters
     filename = re.sub(r'[^\w\s\-.]', '', filename)
-    # Remove leading dots (hidden files)
     filename = filename.lstrip(".")
-    # Limit length
     if len(filename) > 200:
         name, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
         filename = name[:195] + ("." + ext if ext else "")

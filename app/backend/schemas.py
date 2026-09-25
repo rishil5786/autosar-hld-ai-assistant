@@ -9,6 +9,14 @@ from datetime import datetime
 
 
 # --- Auth ---
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: str
+    password: str = Field(..., min_length=6)
+    full_name: str
+    role: Optional[str] = "engineer"
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str

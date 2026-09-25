@@ -1,7 +1,8 @@
 """
 AUTOSAR HLD AI - LLM Service
-Configurable LLM provider supporting OpenAI, Ollama, and HuggingFace.
-Falls back gracefully when no LLM is available.
+Configurable multi-provider LLM service supporting OpenAI GPT-4o,
+Anthropic Claude, Groq Llama-3, Ollama (Local), and HuggingFace.
+Falls back gracefully when no LLM provider is available.
 """
 
 from typing import Optional
@@ -11,12 +12,12 @@ from app.utils.logger import logger
 
 class LLMService:
     """
-    Configurable LLM service supporting multiple providers.
-    Falls back gracefully when no provider is available.
+    Configurable LLM service supporting multiple enterprise and local providers.
+    Supports OpenAI, Anthropic Claude, Groq Llama-3, Local Ollama, and HuggingFace.
     """
 
     def __init__(self):
-        self.provider = settings.LLM_PROVIDER
+        self.provider = settings.LLM_PROVIDER.lower() if settings.LLM_PROVIDER else "none"
         self._available = None
 
     @property
@@ -26,6 +27,10 @@ class LLMService:
             return self._available
 
         if self.provider == "openai" and settings.OPENAI_API_KEY:
+            self._available = True
+        elif self.provider == "anthropic" and settings.ANTHROPIC_API_KEY:
+            self._available = True
+        elif self.provider == "groq" and settings.GROQ_API_KEY:
             self._available = True
         elif self.provider == "ollama":
             self._available = self._check_ollama()
@@ -38,12 +43,12 @@ class LLMService:
 
     def generate(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.1) -> Optional[str]:
         """
-        Generate a response from the LLM.
+        Generate a response from the configured LLM provider.
 
         Args:
             prompt: Input prompt
             max_tokens: Maximum response tokens
-            temperature: Sampling temperature (low for factual)
+            temperature: Sampling temperature (low for deterministic factual outputs)
 
         Returns:
             Generated text or None if unavailable
@@ -55,6 +60,10 @@ class LLMService:
         try:
             if self.provider == "openai":
                 return self._generate_openai(prompt, max_tokens, temperature)
+            elif self.provider == "anthropic":
+                return self._generate_anthropic(prompt, max_tokens, temperature)
+            elif self.provider == "groq":
+                return self._generate_groq(prompt, max_tokens, temperature)
             elif self.provider == "ollama":
                 return self._generate_ollama(prompt, max_tokens, temperature)
             elif self.provider == "huggingface":
@@ -62,7 +71,7 @@ class LLMService:
             else:
                 return None
         except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
+            logger.error(f"LLM generation failed ({self.provider}): {e}")
             return None
 
     def _generate_openai(self, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:
@@ -73,7 +82,7 @@ class LLMService:
             response = client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are an AUTOSAR HLD analysis assistant."},
+                    {"role": "system", "content": "You are an expert AUTOSAR High-Level Design (HLD) systems architect assistant."},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=max_tokens,
@@ -82,6 +91,72 @@ class LLMService:
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI generation error: {e}")
+            return None
+
+    def _generate_anthropic(self, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:
+        """Generate using Anthropic Claude API."""
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            message = client.messages.create(
+                model=settings.ANTHROPIC_MODEL,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system="You are an expert AUTOSAR High-Level Design (HLD) systems architect assistant.",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            if message.content and len(message.content) > 0:
+                return message.content[0].text
+            return None
+        except ImportError:
+            logger.error("Anthropic package not installed. Run `pip install anthropic`.")
+            return None
+        except Exception as e:
+            logger.error(f"Anthropic generation error: {e}")
+            return None
+
+    def _generate_groq(self, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:
+        """Generate using Groq (ultra-fast Llama-3 / Mixtral inference)."""
+        try:
+            from groq import Groq
+            client = Groq(api_key=settings.GROQ_API_KEY)
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are an expert AUTOSAR High-Level Design (HLD) systems architect assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                model=settings.GROQ_MODEL,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return chat_completion.choices[0].message.content
+        except ImportError:
+            logger.error("Groq package not installed. Run `pip install groq`.")
+            # Fallback to direct HTTP request for Groq REST API
+            import requests
+            headers = {
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": settings.GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are an expert AUTOSAR systems architect assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=30)
+            if res.status_code == 200:
+                data = res.json()
+                return data["choices"][0]["message"]["content"]
+            logger.error(f"Groq HTTP API returned status {res.status_code}: {res.text}")
+            return None
+        except Exception as e:
+            logger.error(f"Groq generation error: {e}")
             return None
 
     def _generate_ollama(self, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:

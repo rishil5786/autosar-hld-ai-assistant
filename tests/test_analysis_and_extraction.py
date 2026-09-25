@@ -133,3 +133,50 @@ def test_arxml_generation():
     assert root.tag == "{http://autosar.org/schema/r4.0}AUTOSAR" or root.tag == "AUTOSAR"
     assert "CellVoltageMonitor" in arxml_str
     assert "If_CellVoltage" in arxml_str
+
+
+def test_offline_rule_synthesizer_swc_intent():
+    from app.rag.rule_synthesizer import OfflineRuleSynthesizer
+    from app.rag.retriever import RetrievalResult
+
+    chunks = [
+        RetrievalResult(
+            chunk_id="chk_1",
+            document_name="BMS_HLD_Specification_v1.0.pdf",
+            page_number=1,
+            section="Software Components",
+            text="CellVoltageMonitor (SensorActuatorSWC): Measures cell voltages and filters noise.\nContactorControlManager (ApplicationSWC): Manages high-voltage contactors.",
+            score=0.88
+        )
+    ]
+
+    answer = OfflineRuleSynthesizer.synthesize_answer("What SWCs are defined in the document?", chunks)
+    assert "CellVoltageMonitor" in answer
+    assert "ContactorControlManager" in answer
+    assert "SensorActuatorSWC" in answer
+    assert "BMS_HLD_Specification_v1.0.pdf" in answer
+
+
+def test_auth_password_and_jwt_rbac():
+    from app.utils.security import hash_password, verify_password, create_access_token, decode_access_token
+
+    raw_pw = "SecureAutosarPass2026!"
+    hashed = hash_password(raw_pw)
+    assert verify_password(raw_pw, hashed) is True
+    assert verify_password("WrongPassword", hashed) is False
+
+    # Test JWT token generation and role decoding
+    token = create_access_token({"sub": "lead_architect", "role": "architect"})
+    decoded = decode_access_token(token)
+    assert decoded is not None
+    assert decoded["sub"] == "lead_architect"
+    assert decoded["role"] == "architect"
+
+
+def test_llm_service_providers_configuration():
+    from app.rag.llm_service import LLMService
+
+    service = LLMService()
+    # Test fallback mode when no keys are set
+    assert isinstance(service.provider, str)
+

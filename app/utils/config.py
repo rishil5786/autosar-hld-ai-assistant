@@ -38,6 +38,14 @@ class Settings:
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "mistral")
 
+    # Anthropic Claude
+    ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+
+    # Groq (Llama-3)
+    GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
     # HuggingFace
     HF_API_TOKEN: Optional[str] = os.getenv("HF_API_TOKEN")
     HF_MODEL_NAME: str = os.getenv("HF_MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.1")
@@ -83,6 +91,10 @@ class Settings:
     def llm_available(self) -> bool:
         """Check if an LLM provider is configured and available."""
         if self.LLM_PROVIDER == "openai" and self.OPENAI_API_KEY:
+            return True
+        if self.LLM_PROVIDER == "anthropic" and self.ANTHROPIC_API_KEY:
+            return True
+        if self.LLM_PROVIDER == "groq" and self.GROQ_API_KEY:
             return True
         if self.LLM_PROVIDER == "ollama":
             return True

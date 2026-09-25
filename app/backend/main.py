@@ -1,7 +1,7 @@
 """
 AUTOSAR HLD AI - FastAPI Application
-Main application entry point providing REST API for document ingestion,
-entity extraction, RAG Q&A, revision comparison, compliance audit, and exports.
+Main application entry point providing REST API with Role-Based Access Control (RBAC),
+document ingestion, entity extraction, RAG Q&A, revision comparison, compliance audit, and exports.
 """
 
 import os
@@ -11,15 +11,24 @@ from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query as FastQuery, status
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sqlalchemy.orm import Session
 
 from app.utils.config import settings
 from app.utils.logger import logger
+from app.utils.security import (
+    hash_password, verify_password, create_access_token,
+    get_current_user, get_optional_current_user, require_role
+)
 from app.backend.database import init_db, get_db, get_db_session
-from app.backend.models import Document, Project, Chunk, Component, Interface, Port, Signal, Dependency, AnalysisResult
+from app.backend.models import (
+    User, UserRole, Document, Project, Chunk, Component,
+    Interface, Port, Signal, Dependency, AnalysisResult
+)
 from app.backend.schemas import (
+    UserCreate, LoginRequest, TokenResponse, UserInfo,
     QueryRequest, QueryResponse, Citation, ChunkResponse,
     DocumentResponse, DocumentStats, ComponentResponse, InterfaceResponse,
     PortResponse, SignalResponse, DependencyResponse
@@ -48,14 +57,34 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.VECTOR_STORE_DIR, exist_ok=True)
     init_db()
+
+    # Seed default admin user if none exists
+    db = next(get_db_session())
+    try:
+        admin_user = db.query(User).filter(User.username == "admin").first()
+        if not admin_user:
+            admin_user = User(
+                username="admin",
+                email="admin@autosar-ai.internal",
+                password_hash=hash_password("admin123"),
+                full_name="Lead AUTOSAR System Architect",
+                role="admin",
+                is_active=True
+            )
+            db.add(admin_user)
+            db.commit()
+            logger.info("Created default administrator account: username='admin'")
+    finally:
+        db.close()
+
     yield
     logger.info("Shutting down AUTOSAR HLD AI Backend Service...")
 
 
 app = FastAPI(
     title="AUTOSAR HLD AI Document Analysis API",
-    description="Automated Extraction, RAG Q&A, Revision Comparison, and Consistency Validation for AUTOSAR HLDs",
-    version="1.0.0",
+    description="Automated Extraction, Evidence-Grounded RAG, Revision Comparison, and RBAC Consistency Validation for AUTOSAR HLDs",
+    version="1.1.0",
     lifespan=lifespan
 )
 
@@ -74,23 +103,91 @@ def root():
     return {
         "service": "AUTOSAR HLD AI Document Analysis API",
         "status": "online",
-        "version": "1.0.0",
+        "version": "1.1.0",
+        "rbac_enabled": True,
         "docs_url": "/docs"
     }
 
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "healthy", "database": "connected", "rag_pipeline": "ready"}
+    return {"status": "healthy", "database": "connected", "rag_pipeline": "ready", "rbac": "active"}
 
 
-# --- Document Ingestion Endpoints ---
+# --- Authentication & RBAC Endpoints ---
+
+@app.post("/api/auth/register", response_model=UserInfo, status_code=status.HTTP_201_CREATED)
+def register_user(user_in: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user account with role assignment."""
+    existing = db.query(User).filter((User.username == user_in.username) | (User.email == user_in.email)).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username or email already registered")
+
+    valid_roles = ["admin", "architect", "engineer", "reviewer"]
+    assigned_role = user_in.role.lower() if user_in.role and user_in.role.lower() in valid_roles else "engineer"
+
+    new_user = User(
+        username=user_in.username,
+        email=user_in.email,
+        password_hash=hash_password(user_in.password),
+        full_name=user_in.full_name,
+        role=assigned_role,
+        is_active=True
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login(login_data: LoginRequest, db: Session = Depends(get_db)):
+    """Authenticate and receive a JWT Bearer token."""
+    user = db.query(User).filter(User.username == login_data.username).first()
+    if not user or not verify_password(login_data.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    token = create_access_token({"sub": user.username, "role": user.role, "id": user.id})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": user.role,
+        "username": user.username,
+        "full_name": user.full_name
+    }
+
+
+@app.post("/api/auth/token", response_model=TokenResponse)
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """OAuth2 standard password form token endpoint (for Swagger UI)."""
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+
+    token = create_access_token({"sub": user.username, "role": user.role, "id": user.id})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": user.role,
+        "username": user.username,
+        "full_name": user.full_name
+    }
+
+
+@app.get("/api/auth/me", response_model=UserInfo)
+def get_current_user_profile(current_user: User = Depends(get_current_user)):
+    """Get profile of current authenticated user."""
+    return current_user
+
+
+# --- Document Ingestion Endpoints (RBAC Enforced) ---
 
 @app.post("/api/documents/upload", response_model=Dict[str, Any])
 async def upload_document(
     file: UploadFile = File(...),
     version: Optional[str] = Form("1.0"),
     project_id: Optional[int] = Form(1),
+    current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -107,10 +204,10 @@ async def upload_document(
 
     file_size = os.path.getsize(file_path)
 
-    # Ensure default project exists
+    owner_id = current_user.id if current_user else 1
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
-        project = Project(id=1, name="Default AUTOSAR Project", description="Main System ECU Design", owner_id=1)
+        project = Project(id=1, name="Default AUTOSAR Project", description="Main System ECU Design", owner_id=owner_id)
         db.add(project)
         db.commit()
 
@@ -128,7 +225,7 @@ async def upload_document(
     db.commit()
     db.refresh(db_doc)
 
-    logger.info(f"Document uploaded: {file.filename} (ID: {doc_id})")
+    logger.info(f"Document uploaded: {file.filename} (ID: {doc_id}) by user={current_user.username if current_user else 'system'}")
     return {
         "message": "Document uploaded successfully",
         "document_id": doc_id,
@@ -139,7 +236,11 @@ async def upload_document(
 
 
 @app.post("/api/ingestion/process/{doc_id}")
-def process_document(doc_id: str, db: Session = Depends(get_db)):
+def process_document(
+    doc_id: str,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Ingest, parse, chunk, embed, and extract AUTOSAR architecture entities from the document.
     """
@@ -194,7 +295,6 @@ def process_document(doc_id: str, db: Session = Depends(get_db)):
                 vstore.save()
 
         # 4. Extract Architecture Entities (Components, Ports, Interfaces)
-        # Clear existing extracted entities
         db.query(Component).filter(Component.document_id == doc_id).delete()
         db.query(Interface).filter(Interface.document_id == doc_id).delete()
         db.query(Port).filter(Port.document_id == doc_id).delete()
